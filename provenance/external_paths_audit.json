@@ -1,0 +1,75 @@
+{
+  "mvtec": {
+    "path": "/opt/data/private/MVTecAD",
+    "exists": true,
+    "resolved": "/opt/data/private/MVTecAD",
+    "empty": false,
+    "manifest_categories": {
+      "train": 15,
+      "test": 15
+    },
+    "manifest_counts": {
+      "train": {
+        "normal": 3629
+      },
+      "test": {
+        "normal": 467,
+        "anomalous": 1258
+      }
+    },
+    "first_training_image_exists": true
+  },
+  "visa": {
+    "path": "/opt/data/private/Data/VisA",
+    "exists": true,
+    "resolved": "/opt/data/private/Data/VisA",
+    "empty": false,
+    "manifest_categories": {
+      "train": 12,
+      "test": 12
+    },
+    "manifest_counts": {
+      "train": {
+        "normal": 8659
+      },
+      "test": {
+        "normal": 962,
+        "anomalous": 1200
+      }
+    },
+    "first_training_image_exists": true
+  },
+  "btad": {
+    "path": "/opt/data/private/Btad",
+    "exists": true,
+    "resolved": "/opt/data/private/Btad",
+    "empty": true
+  },
+  "dtd": {
+    "path": "/opt/data/private/data/dtd-synthetic",
+    "exists": true,
+    "resolved": "/opt/data/private/data/dtd-synthetic",
+    "empty": false,
+    "manifest_categories": {
+      "train": 12,
+      "test": 12
+    },
+    "manifest_counts": {
+      "train": {
+        "normal": 1200
+      },
+      "test": {
+        "normal": 357,
+        "anomalous": 947
+      }
+    },
+    "first_training_image_exists": true
+  },
+  "dinov2": {
+    "hub_source_exists": true,
+    "weights_exists": true,
+    "weights_bytes": 346378731,
+    "dinov2_weights_sha256": "0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73",
+    "hubconf_sha256": "c1f5090e78ff940b72c076d2bf9c0310d1707c946b3d10e2d6f2b0bdf56a6f64"
+  }
+}

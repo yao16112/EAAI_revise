@@ -1,0 +1,31 @@
+# Track source, configuration, provenance and documentation only.
+*
+!*/
+!/.gitignore
+!/AGENTS.md
+!/LICENSE
+!/README.md
+!/MIGRATION_REPORT.md
+!/main.py
+!/config/**/*.py
+!/configs/*.json
+!/dataset/**/*.py
+!/model/**/*.py
+!/scripts/**/*.py
+!/scripts/**/*.md
+!/scripts/**/*.sh
+!/tests/**/*.py
+!/tool/**/*.py
+!/provenance/*.json
+!/provenance/*.patch
+!/provenance/*.txt
+!/experiments/**/*.py
+!/experiments/**/*.sh
+!/experiments/**/*.md
+
+# Keep generated files, credentials and research artifacts local.
+**/__pycache__/
+**/.env
+**/.env.*
+**/.venv/
+**/.pytest_cache/

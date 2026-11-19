@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "tracked_files_verified": 230,
+  "copied_source_files_verified": 26,
+  "git_status_unchanged": true,
+  "method": "SHA256 of original tracked files and every copied source file; Git status before/after",
+  "limitations": "No whole-dataset/checkpoint/output-content hashing; those paths were not written."
+}

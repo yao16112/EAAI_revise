@@ -1,0 +1,19 @@
+{
+  "status": "CODE READY / PAPER REPRODUCTION UNVERIFIED",
+  "formal_training_started": false,
+  "copied_files": 26,
+  "static_verification": "PASS",
+  "entrypoint_policy_test": "PASS: mocked 3 epochs, save-final-before-test, zero-metric case",
+  "gpu_smoke": "PASS",
+  "gpu_smoke_exit_code": 0,
+  "source_preservation": {
+    "status": "PASS",
+    "tracked_files_verified": 230,
+    "copied_source_files_verified": 26,
+    "git_status_unchanged": true,
+    "method": "SHA256 of original tracked files and every copied source file; Git status before/after",
+    "limitations": "No whole-dataset/checkpoint/output-content hashing; those paths were not written."
+  },
+  "ordinary_sandbox_recovered": false,
+  "execution_route": "individually approved migration/smoke commands"
+}

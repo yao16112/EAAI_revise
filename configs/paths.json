@@ -1,0 +1,10 @@
+{
+  "datasets": {
+    "mvtec": "/opt/data/private/MVTecAD",
+    "visa": "/opt/data/private/Data/VisA",
+    "btad": "/opt/data/private/Btad",
+    "dtd": "/opt/data/private/data/dtd-synthetic"
+  },
+  "dinov2_hub": "/root/.cache/torch/hub/facebookresearch_dinov2_main",
+  "dinov2_weights": "/root/.cache/torch/hub/checkpoints/dinov2_vitb14_pretrain.pth"
+}

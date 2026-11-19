@@ -1,0 +1,1107 @@
+diff --git a/dataset/__init__.py b/dataset/__init__.py
+index 539d2cd..3c825b1 100644
+--- a/dataset/__init__.py
++++ b/dataset/__init__.py
+@@ -3,6 +3,7 @@ from .visa import VISA_CLS_NAMES, VisaDataset, VISA_ROOT
+ from .btad import BTAD_CLS_NAMES, BTADDataset, BTAD_ROOT
+ from .dtd import DTD_CLS_NAMES,DTDDataset,DTD_ROOT
+ 
++from .taoci import TAOCI_CLS_NAMES, TaoциDataset, TAOCI_ROOT
+ from .base import BaseDataset
+ from torch.utils.data import ConcatDataset
+ 
+@@ -11,6 +12,7 @@ dataset_dict = {
+     'dtd': (DTD_CLS_NAMES, DTDDataset, DTD_ROOT),
+     'mvtec': (MVTEC_CLS_NAMES, MVTecDataset, MVTEC_ROOT),
+     'visa': (VISA_CLS_NAMES, VisaDataset, VISA_ROOT),
++    'taoci': (TAOCI_CLS_NAMES, TaoциDataset, TAOCI_ROOT),
+ }
+ 
+ def get_dataset(dataset_types, transform, target_transform, training, mode, k_shot,
+diff --git a/dataset/base.py b/dataset/base.py
+index 1d33231..25bb059 100644
+--- a/dataset/base.py
++++ b/dataset/base.py
+@@ -77,17 +77,27 @@ class BaseSolver(object):
+ 
+                         # 如果是异常样本，尝试寻找 Ground Truth Mask
+                         if is_anomaly == 1:
+-                            # 假设文件名是 000.png, mask 通常是 ground_truth/type/000_mask.png
++                            # mask 命名因数据集而异: MVTec 是 000_mask.png,
++                            # DTD-Synthetic/BTAD 是与图像同名的 .png/.bmp
+                             basename = os.path.basename(img_p)
+-                            name_no_ext = os.path.splitext(basename)[0]
+-                            mask_name = name_no_ext + '_mask.png'
+-                            gt_path = os.path.join(gt_root, defect_type, mask_name)
+-
+-                            if os.path.exists(gt_path):
+-                                rel_mask_path = os.path.relpath(gt_path, self.root)
++                            name_no_ext, img_ext = os.path.splitext(basename)
++                            candidates = [
++                                name_no_ext + '_mask.png',
++                                name_no_ext + '.png',
++                                name_no_ext + '.bmp',
++                                basename,
++                            ]
++                            for mask_name in candidates:
++                                gt_path = os.path.join(gt_root, defect_type, mask_name)
++                                if os.path.exists(gt_path):
++                                    rel_mask_path = os.path.relpath(gt_path, self.root)
++                                    break
+                             else:
+-                                # 有些数据集 mask 后缀不同，这里做一个简单的容错
+-                                rel_mask_path = rel_path
++                                # 绝不能回退到图像本身: 那会产生全 1 的假 mask,
++                                # 使像素级指标静默失效 (2026-07-02 修复的 bug)
++                                print(f'[BaseDataset] WARNING: no GT mask found for '
++                                      f'anomalous image {rel_path}; pixel metrics for '
++                                      f'this image will treat it as all-normal.')
+ 
+                         info_required['test'][cls].append({
+                             'img_path': rel_path,
+@@ -391,8 +401,8 @@ class BaseDataset(data.Dataset):
+             img_mask = Image.fromarray(np.zeros((img.size[0], img.size[1])), mode='L')
+         else:
+             full_mask_path = os.path.join(self.root, mask_path)
+-            # 容错：防止mask文件不存在
+-            if os.path.exists(full_mask_path):
++            # 容错：防止mask文件不存在 (mask_path 为空时 join 结果是 root 目录本身)
++            if mask_path and os.path.isfile(full_mask_path):
+                 img_mask = np.array(Image.open(full_mask_path).convert('L')) > 0
+                 img_mask = Image.fromarray(img_mask.astype(np.uint8) * 255, mode='L')
+             else:
+diff --git a/dataset/visa.py b/dataset/visa.py
+index 5380a92..7262672 100644
+--- a/dataset/visa.py
++++ b/dataset/visa.py
+@@ -1,6 +1,7 @@
+ import json
+ import os
+ import random
++import csv
+ import numpy as np
+ import torch.utils.data as data
+ from PIL import Image
+@@ -14,7 +15,7 @@ VISA_CLS_NAMES = [
+     'pcb4', 'pipe_fryum',
+ ]
+ 
+-VISA_ROOT = '/opt/data/private/VisA'
++VISA_ROOT = '/opt/data/private/Data/VisA'
+ 
+ 
+ class VisaSolver(object):
+@@ -25,6 +26,9 @@ class VisaSolver(object):
+         self.meta_path = os.path.join(root, 'meta.json')
+ 
+     def run(self):
++        if not os.path.exists(self.meta_path):
++            return self._run_from_split_csv()
++
+         # 读取 meta.json
+         with open(self.meta_path, 'r') as f:
+             meta_info = json.load(f)
+@@ -45,6 +49,32 @@ class VisaSolver(object):
+         
+         return info_required
+ 
++    def _run_from_split_csv(self):
++        split_path = os.path.join(self.root, 'split_csv', '1cls.csv')
++        info_required = {'train': {}, 'test': {}}
++        for cls in self.CLSNAMES:
++            info_required['train'][cls] = []
++            info_required['test'][cls] = []
++
++        with open(split_path, newline='') as f:
++            reader = csv.DictReader(f)
++            for row in reader:
++                cls = row['category']
++                if cls not in self.CLSNAMES:
++                    continue
++                split = row['split']
++                label = row['label']
++                anomaly = 0 if label == 'normal' else 1
++                info_required[split][cls].append({
++                    'img_path': row['image'],
++                    'mask_path': row.get('mask') or '',
++                    'cls_name': cls,
++                    'specie_name': label,
++                    'anomaly': anomaly,
++                })
++
++        return info_required
++
+ 
+ class VisaDataset(BaseDataset):
+     def __init__(self, class_names, transform, target_transform, synthesis_anomalies=True,
+diff --git a/main.py b/main.py
+index 9940649..db834ee 100644
+--- a/main.py
++++ b/main.py
+@@ -45,6 +45,7 @@ VISA_CATEGORIES = [
+     'pcb4', 'pipe_fryum'
+ ]
+ 
++TAOCI_CATEGORIES = ['taoci']
+ BTAD_CATEGORIES=[
+     '01','02','03'
+ ]
+@@ -105,10 +106,19 @@ def train_single_category(args, category):
+         pretrained=args.ckt_path,
+         is_proj=args.is_proj,
+         adapter=args.adapter,
++        use_sequence_prediction=args.use_seq_pred,
++        lambda_spatial=args.lambda_spatial,
++        seq_loss_weight=args.seq_loss_weight,
+         noise_type=args.noise_type,
++        noise_pattern=args.noise_pattern,
++        noise_op=args.noise_op,
+         noise_ratio_min=args.noise_ratio_min,
+         noise_ratio_max=args.noise_ratio_max,
+         clean_ratio=args.clean_ratio,
++        decoder_type=args.decoder_type,
++        native_res=getattr(args, 'native_res', False),
++        edge_crop=getattr(args, 'edge_crop', 0),
++        loss_type=getattr(args, 'loss_type', 'mse_l1'),
+     )
+ 
+     train_data_cls_names, train_data, train_data_root = get_dataset(
+@@ -239,7 +249,7 @@ def train(args):
+     """主训练函数 - 支持训练多个类别"""
+         # ============ 新增：支持训练所有数据集 ============
+     if args.dataset == 'all':
+-        all_datasets = ['mvtec', 'visa', 'btad', 'dtd']
++        all_datasets = ['mvtec', 'visa', 'btad', 'dtd', 'taoci']
+         print("="*60)
+         print("训练所有数据集")
+         print("="*60)
+@@ -264,6 +274,8 @@ def train(args):
+         ALL_CATEGORIES = VISA_CATEGORIES
+     elif args.dataset == 'btad':
+         ALL_CATEGORIES = BTAD_CATEGORIES
++    elif args.dataset == 'taoci':
++        ALL_CATEGORIES = TAOCI_CATEGORIES
+     elif args.dataset == 'dtd':
+         ALL_CATEGORIES = DTD_CATEGORIES
+     else:
+@@ -395,16 +407,33 @@ if __name__ == '__main__':
+     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
+ 
+     parser.add_argument("--image_size", type=int, default=512, help="Image size")
++    parser.add_argument("--native_res", type=str2bool, default=False,
++                        help="使用原生分辨率, 不resize, 仅pad到14倍数; 每图尺寸不同, 强制batch_size=1")
++    parser.add_argument("--edge_crop", type=int, default=0,
++                        help="裁掉左右两侧各 N 像素 (去除陶瓷黄边, 非异常); 0=不裁")
+     parser.add_argument("--print_freq", type=int, default=1, help="Print frequency")
+     parser.add_argument("--valid_freq", type=int, default=5, help="Validation frequency")
+ 
+-    parser.add_argument('--noise_type', type=str, default='all', 
+-                    choices=['none', 'perlin', 'gaussian', 'stripe', 'mixed', 'all'])
++    parser.add_argument('--noise_type', type=str, default='divnoise',
++                    choices=['none', 'perlin', 'gaussian', 'stripe', 'mixed', 'all', 'ortho', 'simple', 'divnoise', 'divsigma'])
++    parser.add_argument('--noise_pattern', type=str, default='all',
++                    choices=['blob', 'stripe', 'scatter', 'mixed', 'all'],
++                    help="空间模板(WHERE)，仅 --noise_type ortho 生效")
++    parser.add_argument('--noise_op', type=str, default='all',
++                    choices=['gauss', 'shift', 'scale', 'swap', 'all'],
++                    help="腐蚀算子(WHAT)，仅 --noise_type ortho 生效")
+     parser.add_argument('--noise_ratio_min', type=float, default=0.02)
+     parser.add_argument('--noise_ratio_max', type=float, default=0.22)
+     parser.add_argument('--clean_ratio', type=float, default=0.5)
+-    parser.add_argument('--pred_next_n', type=int, default=8)
++    parser.add_argument('--pred_next_n', type=int, default=0)
+     parser.add_argument('--use_seq_pred', type=str2bool, default=True)
++    parser.add_argument('--lambda_spatial', type=float, default=1.0,
++                        help="L1在重建损失中的权重: loss = MSE + lambda_spatial * L1; 0=不使用L1")
++    parser.add_argument('--seq_loss_weight', type=float, default=0.5,
++                        help="序列预测损失权重: total = recon + seq_loss_weight * seq; 0=不使用序列预测损失")
++    parser.add_argument('--decoder_type', type=str, default='vssm', choices=['vssm', 'cnn', 'transformer'])
++    parser.add_argument('--loss_type', type=str, default='mse_l1', choices=['mse_l1', 'mse', 'l1', 'cosine'],
++                        help="重建损失类型: mse_l1(默认,原行为)/mse/l1/cosine; 用于 loss-function 消融")
+ 
+     args = parser.parse_args()
+ 
+@@ -414,7 +443,11 @@ if __name__ == '__main__':
+             args.category = args.category[0]
+         # 如果是多个类别，保持为列表
+ 
+-    if args.model.count('DINO') > 0 or args.model.count('dinov2') > 0:
++    if args.native_res:
++        # 原生分辨率: 不 resize, 每张图尺寸不同 -> 必须 batch_size=1
++        args.batch_size = 1
++        print("[native_res] 使用原生分辨率, 不 resize, 仅 pad 到 14 倍数, batch_size 强制为 1")
++    elif args.model.count('DINO') > 0 or args.model.count('dinov2') > 0:
+         args.image_size = 14 * (args.image_size // 14)
+ 
+     train(args)
+\ No newline at end of file
+diff --git a/model/VarAD/anomaly_mamba.py b/model/VarAD/anomaly_mamba.py
+index e758fe0..72ae5a9 100644
+--- a/model/VarAD/anomaly_mamba.py
++++ b/model/VarAD/anomaly_mamba.py
+@@ -2,16 +2,14 @@
+ ================================================================================
+ MARS - 噪声消融实验版本
+ ================================================================================
+-新增参数：
+-  --noise_type: none, perlin, gaussian, stripe, mixed, all (默认)
+-  --noise_ratio_min: 噪声最小比例 (默认0.02)
+-  --noise_ratio_max: 噪声最大比例 (默认0.22)
+-  --clean_ratio: 干净样本比例 (默认0.5)
++
+ ================================================================================
+ """
+ 
++import math
+ import numpy as np
+ from .vssm import VSSM
++from .decoder_variants import build_decoder
+ from .vision_tokenizer import VisionTokenizer
+ from .dino_vision_tokenizer import VisionTokenizer as DINOVisionTokenizer
+ from torch import nn
+@@ -28,7 +26,7 @@ class AnomalyMamba(nn.Module):
+                  depths=[2, 2],
+                  bos_length=4,
+                  valid_path=0,
+-                 pred_next_n=8,
++                 pred_next_n=0,
+                  image_size=256,
+                  lambda_spatial=1.,
+                  learnable_bos=True,
+@@ -40,10 +38,14 @@ class AnomalyMamba(nn.Module):
+                  use_sequence_prediction=True,
+                  clean_ratio=0.5,
+                  seq_loss_weight=0.5,
++                 decoder_type='vssm',
++                 loss_type='mse_l1',  # 重建损失类型: 'mse_l1'(默认,原行为), 'mse', 'l1'
+                  # ⭐ 噪声消融参数
+-                 noise_type='all',  # none, perlin, gaussian, stripe, mixed, all
++                 noise_type='divnoise',  # default: diverse zero-mean unit-variance noise
+                  noise_ratio_min=0.02,
+                  noise_ratio_max=0.22,
++                 noise_pattern='all',  # blob, stripe, scatter, mixed, all (仅 noise_type='ortho' 生效)
++                 noise_op='all',       # gauss, shift, scale, swap, all (仅 noise_type='ortho' 生效)
+                  ):
+         super(AnomalyMamba, self).__init__()
+ 
+@@ -53,14 +55,22 @@ class AnomalyMamba(nn.Module):
+         self.lambda_spatial = lambda_spatial
+         self.clean_ratio = clean_ratio
+         self.seq_loss_weight = seq_loss_weight
++        self.decoder_type = decoder_type.lower()
++        self.loss_type = loss_type.lower()
++        assert self.loss_type in ('mse_l1', 'mse', 'l1', 'cosine'), \
++            f"Unsupported loss_type={loss_type!r} (expected 'mse_l1', 'mse', 'l1' or 'cosine')"
+         
+         # ⭐ 噪声消融参数
+         self.noise_type = noise_type
+         self.noise_ratio_min = noise_ratio_min
+         self.noise_ratio_max = noise_ratio_max
++        self.noise_pattern = noise_pattern
++        self.noise_op = noise_op
+         print(f"[AnomalyMamba] noise_type: {self.noise_type}, "
+               f"ratio: [{self.noise_ratio_min}, {self.noise_ratio_max}], "
+-              f"clean_ratio: {self.clean_ratio}")
++              f"clean_ratio: {self.clean_ratio}"
++              + (f", pattern: {self.noise_pattern}, op: {self.noise_op}"
++                 if self.noise_type == 'ortho' else ""))
+ 
+         # Tokenizer
+         if backbone.count('DINO') > 0 or backbone.count('dinov2') > 0:
+@@ -77,22 +87,39 @@ class AnomalyMamba(nn.Module):
+         dims = self.tokenizer.target_dimension
+         x = self.tokenizer(cache_data)
+ 
+-        # VSSM模块
++        # Decoder模块
+         self.vssm = nn.ModuleList()
+         n_blocks = 1
+         for indx, d in enumerate(dims):
+-            vssm_temp = nn.Sequential(*[
+-                VSSM(depths=depths,
+-                     dims=d,
+-                     pred_next_n=pred_next_n // (2 ** indx),
+-                     valid_path=valid_path,
+-                     learnable_bos=learnable_bos,
+-                     use_pe=use_pe,
+-                     cache_data=x[indx],
+-                     use_path_weights=use_path_weights,
+-                     ) for _ in range(n_blocks)
+-            ])
+-            self.vssm.append(vssm_temp)
++            if self.decoder_type == 'vssm':
++                decoder_temp = nn.Sequential(*[
++                    VSSM(depths=depths,
++                         dims=d,
++                         pred_next_n=pred_next_n // (2 ** indx),
++                         valid_path=valid_path,
++                         learnable_bos=learnable_bos,
++                         use_pe=use_pe,
++                         cache_data=x[indx],
++                         use_path_weights=use_path_weights,
++                         ) for _ in range(n_blocks)
++                ])
++            elif self.decoder_type in {'cnn', 'transformer'}:
++                decoder_temp = nn.Sequential(*[
++                    build_decoder(
++                        self.decoder_type,
++                        dim=d,
++                        depths=depths,
++                        pred_next_n=pred_next_n // (2 ** indx),
++                        valid_path=valid_path,
++                        learnable_bos=learnable_bos,
++                        use_pe=use_pe,
++                        cache_data=x[indx],
++                        use_path_weights=use_path_weights,
++                    ) for _ in range(n_blocks)
++                ])
++            else:
++                raise ValueError(f"Unsupported decoder_type={decoder_type!r}")
++            self.vssm.append(decoder_temp)
+ 
+         # 序列预测头
+         if self.use_sequence_prediction:
+@@ -107,173 +134,273 @@ class AnomalyMamba(nn.Module):
+                 )
+ 
+     def train(self, mode: bool = True):
++        super().train(mode)
+         self.tokenizer.frozen_tokenizer.eval()
+-        self.tokenizer.proj.train()
+-        self.vssm.train()
++        self.tokenizer.proj.train(mode)
++        self.vssm.train(mode)
+         if self.use_sequence_prediction:
+-            self.seq_pred_heads.train()
++            self.seq_pred_heads.train(mode)
++        return self
+ 
+     def eval(self):
+-        self.tokenizer.frozen_tokenizer.eval()
+-        self.tokenizer.proj.eval()
+-        self.vssm.eval()
+-        if self.use_sequence_prediction:
+-            self.seq_pred_heads.eval()
++        return self.train(False)
+ 
+     def inject_token_noise(self, x):
++        """两正交轴的特征空间腐蚀: 空间模板(WHERE) × 腐蚀算子(WHAT).
++
++        空间模板 (noise_pattern) 只决定噪声出现的位置 (二值掩码 M):
++          - 'blob'   : Perlin 平滑场阈值 -> 连续块状 (污渍/斑块)
++          - 'stripe' : 随机整行/整列      -> 直线条带 (划痕/裂纹)
++          - 'scatter': 随机离散 token     -> 散点     (坏点/噪点)
++          - 'mixed'  : 上述三种掩码的并集
++        腐蚀算子 (noise_op) 决定在 M=1 处如何改写特征:
++          - 'gauss'  : 加性零均值高斯       E + M⊙(σ_E·ε)
++          - 'shift'  : 非零均值偏移         E + M⊙(β·σ_E)
++          - 'scale'  : 乘性幅值畸变         E·(1+(γ-1)·M)
++          - 'swap'   : 特征替换(空间打乱)   (1-M)⊙E + M⊙shuffle(E)
++        σ_E 为逐通道空间标准差, 掩码沿通道共享, 每通道独立采样噪声.
++
++        noise_type 作为高层预设:
++          - 'none'  : 不加噪 (纯重建 baseline)
++          - 'perlin'/'gaussian'/'stripe'/'mixed' : 旧式单策略 (对应模板 + op='gauss')
++          - 'all'   : 旧默认 (随机模板 + op='gauss'), 复现历史消融
++          - 'ortho' : 启用 noise_pattern × noise_op 两轴独立采样 (新设计)
++          - 'simple': 随机散点位置(比例随机) + 标准高斯 N(0,1) 加噪
++                      E + M⊙η, η~N(0,1), 不按 σ 缩放
++          - 'divnoise': 形状轴不变(4 种模板随机) + 分布轴多样化
++                      E + M⊙η, η 从 {Gaussian,Laplace,Uniform,Rayleigh,
++                      Gamma,Poisson} 随机取一种, 每种都归一化到均值0方差1.
++                      纯加性零均值噪声, 作为打破恒等映射的去噪正则
++                      (对齐导师 AAAI25 "deep noise evaluation" 的高多样性加噪).
+         """
+-        噪声注入 - 消融实验版本
+-        
+-        noise_type:
+-          - 'none': 不加噪声（纯重建baseline）
+-          - 'perlin': 只用Perlin噪声
+-          - 'gaussian': 只用Gaussian噪声
+-          - 'stripe': 只用Stripe噪声3
+-          - 'mixed': 只用混合噪声（三种叠加）
+-          - 'all': 原版，随机选择四种之一（默认）
+-        """
+-        if not self.training:
+-            return x
+-        
+-        # ⭐ 不加噪声（消融baseline）
+-        if self.noise_type == 'none':
++        if not self.training or self.noise_type == 'none':
+             return x
+ 
+         B, C, H, W = x.shape
+         device = x.device
+         x_noisy = x.clone()
+ 
+-        # 干净样本mask
++        # 每个样本以 clean_ratio 概率保持干净
+         clean_mask = torch.rand(B, device=device) < self.clean_ratio
+-        
+-        # 噪声比例
+         noise_range = self.noise_ratio_max - self.noise_ratio_min
+         noise_ratios = torch.rand(B, device=device) * noise_range + self.noise_ratio_min
+         noise_ratios[clean_mask] = 0.0
+ 
+         for b in range(B):
+-            if noise_ratios[b] == 0:
+-                continue
+-
+             ratio = noise_ratios[b].item()
+-            x_curr = x_noisy[b:b + 1]
+-            x_clean = x[b:b + 1]
+-
+-            # ⭐ 根据 noise_type 选择策略
+-            if self.noise_type == 'perlin':
+-                x_noisy[b:b + 1] = self._add_perlin_noise(x_curr, x_clean, ratio)
+-            
+-            elif self.noise_type == 'gaussian':
+-                x_noisy[b:b + 1] = self._add_gaussian_noise(x_curr, x_clean, ratio)
+-            
+-            elif self.noise_type == 'stripe':
+-                x_noisy[b:b + 1] = self._add_stripe_noise(x_curr, x_clean, ratio)
+-            
+-            elif self.noise_type == 'mixed':
+-                # 三种噪声叠加
+-                splits = torch.rand(3, device=device)
+-                splits = splits / splits.sum()
+-                x_curr = self._add_perlin_noise(x_curr, x_clean, ratio * splits[0] * 0.8)
+-                x_curr = self._add_stripe_noise(x_curr, x_clean, ratio * splits[1] * 0.8)
+-                x_curr = self._add_gaussian_noise(x_curr, x_clean, ratio * splits[2] * 0.8)
+-                x_noisy[b:b + 1] = x_curr
+-            
+-            else:  # 'all' - 原版策略，随机选择
+-                strategy = torch.randint(0, 4, (1,)).item()
+-                if strategy == 0:
+-                    x_noisy[b:b + 1] = self._add_perlin_noise(x_curr, x_clean, ratio)
+-                elif strategy == 1:
+-                    x_noisy[b:b + 1] = self._add_gaussian_noise(x_curr, x_clean, ratio)
+-                elif strategy == 2:
+-                    x_noisy[b:b + 1] = self._add_stripe_noise(x_curr, x_clean, ratio)
+-                else:
+-                    splits = torch.rand(3, device=device)
+-                    splits = splits / splits.sum()
+-                    x_curr = self._add_perlin_noise(x_curr, x_clean, ratio * splits[0] * 0.8)
+-                    x_curr = self._add_stripe_noise(x_curr, x_clean, ratio * splits[1] * 0.8)
+-                    x_curr = self._add_gaussian_noise(x_curr, x_clean, ratio * splits[2] * 0.8)
+-                    x_noisy[b:b + 1] = x_curr
++            if ratio <= 0:
++                continue
++            pattern, op = self._resolve_strategy()
++            mask = self._make_mask(pattern, H, W, ratio, device)
++            x_noisy[b:b + 1] = self._apply_corruption(op, x[b:b + 1], mask, device)
+ 
+         return x_noisy
+ 
+-    def _add_perlin_noise(self, x_noisy, x_orig, ratio):
+-        """Perlin噪声：模拟污渍/斑块"""
+-        if ratio <= 0: 
+-            return x_noisy
+-        B, C, H, W = x_noisy.shape
++    # ---- 策略解析 ---------------------------------------------------------
++    def _resolve_strategy(self):
++        """返回 (pattern, op). 兼容旧 noise_type, 并支持 'ortho' 两轴采样."""
++        nt = self.noise_type
++        legacy = {
++            'perlin': ('blob', 'gauss'),
++            'gaussian': ('scatter', 'gauss'),
++            'scatter': ('scatter', 'gauss'),
++            'stripe': ('stripe', 'gauss'),
++            'mixed': ('mixed', 'gauss'),
++        }
++        if nt in legacy:
++            return legacy[nt]
++        if nt == 'all':
++            pattern = ['blob', 'stripe', 'scatter', 'mixed'][torch.randint(0, 4, (1,)).item()]
++            return pattern, 'gauss'
++        if nt == 'simple':
++            # 随机散点位置 (比例由外层随机采样) + 标准高斯 N(0,1)
++            return 'scatter', 'std_gauss'
++        if nt == 'divnoise':
++            # 形状轴: 4 种模板随机 (同旧 'all'); 分布轴: 多样化零均值单位方差噪声
++            pattern = ['blob', 'stripe', 'scatter', 'mixed'][torch.randint(0, 4, (1,)).item()]
++            return pattern, 'divnoise'
++        if nt == 'divsigma':
++            # 同 divnoise 的形状轴(4 模板随机)与分布轴(多样化零均值单位方差 η),
++            # 但第⑥步把噪声按逐通道 σ_z 缩放: E + M⊙(σ_z·η) (而非严格单位方差).
++            pattern = ['blob', 'stripe', 'scatter', 'mixed'][torch.randint(0, 4, (1,)).item()]
++            return pattern, 'divsigma'
++        if nt == 'ortho':
++            pattern = self._pick(self.noise_pattern, ['blob', 'stripe', 'scatter', 'mixed'])
++            op = self._pick(self.noise_op, ['gauss', 'shift', 'scale', 'swap'])
++            return pattern, op
++        # 未知预设回退到散点高斯
++        return 'scatter', 'gauss'
++
++    @staticmethod
++    def _pick(value, choices):
++        """value=='all' 时在 choices 中均匀随机, 否则取 value 本身."""
++        if value == 'all':
++            return choices[torch.randint(0, len(choices), (1,)).item()]
++        return value
++
++    # ---- 空间模板 (WHERE): 生成二值掩码 M, 形状 (1,1,H,W) -----------------
++    def _make_mask(self, pattern, H, W, ratio, device):
++        if pattern == 'blob':
++            return self._mask_blob(H, W, ratio, device)
++        if pattern == 'stripe':
++            return self._mask_stripe(H, W, ratio, device)
++        if pattern == 'scatter':
++            return self._mask_scatter(H, W, ratio, device)
++        if pattern == 'mixed':
++            splits = torch.rand(3, device=device)
++            splits = splits / splits.sum()
++            m = self._mask_blob(H, W, ratio * splits[0].item(), device)
++            m = torch.maximum(m, self._mask_stripe(H, W, ratio * splits[1].item(), device))
++            m = torch.maximum(m, self._mask_scatter(H, W, ratio * splits[2].item(), device))
++            return m
++        raise ValueError(f"Unknown noise pattern: {pattern!r}")
++
++    @staticmethod
++    def _mask_blob(H, W, ratio, device):
++        """Perlin 平滑场取阈值 -> 连续块状掩码."""
+         L = H * W
+-        device = x_noisy.device
+-
+-        num_pixels = int(L * ratio)
+-        if num_pixels <= 0: 
+-            return x_noisy
+-
++        num = int(L * ratio)
++        if num <= 0:
++            return torch.zeros(1, 1, H, W, device=device)
+         freq_h = torch.randint(2, 8, (1,)).item()
+         freq_w = torch.randint(2, 8, (1,)).item()
+-
+-        noise_source = torch.rand(B, 1, freq_h, freq_w, device=device)
+-        perlin_map = F.interpolate(noise_source, size=(H, W), mode='bicubic', align_corners=False)
+-
+-        perlin_flat = perlin_map.view(B, -1)
+-        k = max(1, L - num_pixels)
+-        val, _ = torch.kthvalue(perlin_flat, k, dim=1, keepdim=True)
+-        mask = (perlin_flat > val).view(B, 1, H, W).float()
+-
+-        feat_std = x_orig.std(dim=[2, 3], keepdim=True).clamp(min=1e-6)
+-        scale = feat_std * (torch.rand(B, 1, 1, 1, device=device) * 1.2 + 0.3)
+-        noise = torch.randn_like(x_noisy) * scale
+-
+-        return x_noisy + noise * mask
+-
+-    def _add_stripe_noise(self, x_noisy, x_orig, ratio):
+-        """条纹噪声：模拟划痕"""
+-        if ratio <= 0: 
+-            return x_noisy
+-        B, C, H, W = x_noisy.shape
+-        device = x_noisy.device
+-
+-        is_h = torch.rand(1).item() > 0.5
+-        mask = torch.zeros(B, 1, H, W, device=device)
+-
+-        if is_h:
+-            num_lines = max(1, int(H * ratio * 2))
+-            idx = torch.randperm(H, device=device)[:num_lines]
++        field = F.interpolate(torch.rand(1, 1, freq_h, freq_w, device=device),
++                              size=(H, W), mode='bicubic', align_corners=False)
++        flat = field.view(-1)
++        val = torch.kthvalue(flat, max(1, L - num)).values
++        return (field > val).float()
++
++    @staticmethod
++    def _mask_scatter(H, W, ratio, device):
++        """随机离散 token -> 散点掩码."""
++        L = H * W
++        num = int(L * ratio)
++        if num <= 0:
++            return torch.zeros(1, 1, H, W, device=device)
++        scores = torch.rand(1, L, device=device)
++        _, idx = torch.topk(scores, num, dim=1)
++        mask = torch.zeros(1, L, device=device)
++        mask.scatter_(1, idx, 1.0)
++        return mask.view(1, 1, H, W)
++
++    @staticmethod
++    def _mask_stripe(H, W, ratio, device):
++        """随机整行/整列 -> 直线条带掩码."""
++        mask = torch.zeros(1, 1, H, W, device=device)
++        if torch.rand(1).item() > 0.5:
++            n = max(1, int(H * ratio * 2))
++            idx = torch.randperm(H, device=device)[:n]
+             mask[:, :, idx, :] = 1.0
+         else:
+-            num_lines = max(1, int(W * ratio * 2))
+-            idx = torch.randperm(W, device=device)[:num_lines]
++            n = max(1, int(W * ratio * 2))
++            idx = torch.randperm(W, device=device)[:n]
+             mask[:, :, :, idx] = 1.0
+-
+-        feat_std = x_orig.std(dim=[2, 3], keepdim=True).clamp(min=1e-6)
+-        scale = feat_std * (torch.rand(B, 1, 1, 1, device=device) * 1.5 + 0.5)
+-        noise = torch.randn_like(x_noisy) * scale
+-
+-        return x_noisy + noise * mask
+-
+-    def _add_gaussian_noise(self, x_noisy, x_orig, ratio):
+-        """高斯噪声：模拟坏点/噪点"""
+-        if ratio <= 0: 
+-            return x_noisy
+-        B, C, H, W = x_noisy.shape
+-        L = H * W
+-        device = x_noisy.device
+-
+-        num_tokens = int(L * ratio)
+-        if num_tokens <= 0: 
+-            return x_noisy
+-
+-        x_flat = x_noisy.view(B, C, L).permute(0, 2, 1).contiguous()
+-        rand_scores = torch.rand(B, L, device=device)
+-        _, indices = torch.topk(rand_scores, num_tokens, dim=1)
+-
+-        feat_std = x_orig.std()
+-        scale = feat_std * (torch.rand(B, 1, 1, device=device) * 1.2 + 0.3)
+-        noise = torch.randn(B, num_tokens, C, device=device) * scale
+-
+-        batch_idx = torch.arange(B, device=device).unsqueeze(1).expand(-1, num_tokens)
+-        x_flat[batch_idx, indices] = x_flat[batch_idx, indices] + noise
+-
+-        return x_flat.permute(0, 2, 1).view(B, C, H, W)
++        return mask
++
++    # ---- 腐蚀算子 (WHAT): 在 M=1 处改写特征 ------------------------------
++    def _apply_corruption(self, op, x_clean, mask, device):
++        if op == 'gauss':
++            return self._op_gauss(x_clean, mask, device)
++        if op == 'shift':
++            return self._op_shift(x_clean, mask, device)
++        if op == 'scale':
++            return self._op_scale(x_clean, mask, device)
++        if op == 'swap':
++            return self._op_swap(x_clean, mask, device)
++        if op == 'std_gauss':
++            return self._op_std_gauss(x_clean, mask, device)
++        if op == 'divnoise':
++            return self._op_divnoise(x_clean, mask, device)
++        if op == 'divsigma':
++            return self._op_divsigma(x_clean, mask, device)
++        raise ValueError(f"Unknown noise op: {op!r}")
++
++    @staticmethod
++    def _op_std_gauss(x_clean, mask, device):
++        """标准高斯加噪: E + M⊙η, η~N(0,1) (均值0方差1, 不按 σ 缩放)."""
++        noise = torch.randn_like(x_clean)
++        return x_clean + noise * mask
++
++    # 多样化噪声分布 (每种都归一化到均值0方差1), 对齐导师 AAAI25 noise-evaluation
++    _NOISE_DISTS = ['gaussian', 'laplace', 'uniform', 'rayleigh', 'gamma', 'poisson']
++
++    @staticmethod
++    def _sample_unit_noise(shape, device, dist=None):
++        """采样均值0、方差1的噪声; dist 为空时在 6 种分布中均匀随机 (高多样性)."""
++        if dist is None:
++            dist = AnomalyMamba._NOISE_DISTS[torch.randint(0, len(AnomalyMamba._NOISE_DISTS), (1,)).item()]
++        if dist == 'gaussian':
++            return torch.randn(shape, device=device)
++        if dist == 'laplace':
++            # Laplace(0,b) 方差=2b^2; b=1/√2 -> 方差1
++            # clamp 远离 0/1, 避免 |u|=0.5 时 log1p(-1)=-inf -> NaN
++            u = torch.rand(shape, device=device).clamp(1e-6, 1.0 - 1e-6) - 0.5
++            return -torch.sign(u) * torch.log1p(-2.0 * u.abs()) / math.sqrt(2.0)
++        if dist == 'uniform':
++            # U[-√3,√3] -> 均值0方差1
++            return (torch.rand(shape, device=device) * 2.0 - 1.0) * math.sqrt(3.0)
++        if dist == 'rayleigh':
++            # Rayleigh(s=1): 均值√(π/2), 方差(4-π)/2 -> 平移+缩放到均值0方差1
++            u = torch.rand(shape, device=device).clamp_min(1e-12)
++            r = torch.sqrt(-2.0 * torch.log(u))
++            mean = math.sqrt(math.pi / 2.0)
++            std = math.sqrt((4.0 - math.pi) / 2.0)
++            return (r - mean) / std
++        if dist == 'gamma':
++            # Exp(1)(=Gamma(k=1)): 均值1方差1 -> 平移到均值0 (右偏)
++            u = torch.rand(shape, device=device).clamp_min(1e-12)
++            return (-torch.log(u)) - 1.0
++        if dist == 'poisson':
++            # Poisson(λ=1): 均值1方差1 -> 平移到均值0 (离散右偏)
++            return torch.poisson(torch.ones(shape, device=device)) - 1.0
++        return torch.randn(shape, device=device)
++
++    def _op_divnoise(self, x_clean, mask, device):
++        """多样化零均值单位方差噪声: E + M⊙η, η 随机取一种分布 (均值0方差1)."""
++        noise = self._sample_unit_noise(x_clean.shape, device)
++        return x_clean + noise * mask
++
++    def _op_divsigma(self, x_clean, mask, device):
++        """divnoise + 逐通道 σ_z 缩放: E + M⊙(σ_z·η), η 多样化零均值单位方差,
++        噪声幅值随每通道特征标准差 σ_z 自适应 (对齐 ortho 的 σ 缩放)."""
++        noise = self._sample_unit_noise(x_clean.shape, device)
++        sigma = self._channel_std(x_clean)
++        return x_clean + (sigma * noise) * mask
++
++    @staticmethod
++    def _channel_std(x_clean):
++        """逐通道空间标准差 σ_E, 形状 (1,C,1,1)."""
++        return x_clean.std(dim=[2, 3], keepdim=True).clamp(min=1e-6)
++
++    def _op_gauss(self, x_clean, mask, device):
++        """加性零均值高斯: E + M⊙(σ_E·ε)."""
++        std = self._channel_std(x_clean)
++        scale = std * (torch.rand(1, 1, 1, 1, device=device) * 1.2 + 0.3)
++        noise = torch.randn_like(x_clean) * scale
++        return x_clean + noise * mask
++
++    def _op_shift(self, x_clean, mask, device):
++        """非零均值偏移: E + M⊙(β·σ_E), 模拟系统性特征漂移."""
++        std = self._channel_std(x_clean)
++        sign = 1.0 if torch.rand(1).item() > 0.5 else -1.0
++        beta = (torch.rand(1, 1, 1, 1, device=device) * 1.0 + 0.5) * sign  # |β|∈[0.5,1.5]
++        offset = std * beta
++        return x_clean + offset * mask
++
++    @staticmethod
++    def _op_scale(x_clean, mask, device):
++        """乘性幅值畸变: E·(1+(γ-1)·M), 模拟过/欠激活."""
++        gamma = torch.rand(1, 1, 1, 1, device=device) * 1.5 + 0.5  # γ∈[0.5,2.0]
++        return x_clean * (1.0 + (gamma - 1.0) * mask)
++
++    @staticmethod
++    def _op_swap(x_clean, mask, device):
++        """特征替换: (1-M)⊙E + M⊙shuffle(E), 用空间打乱特征顶替, 模拟结构异常."""
++        _, C, H, W = x_clean.shape
++        flat = x_clean.reshape(1, C, H * W)
++        perm = torch.randperm(H * W, device=device)
++        shuffled = flat[:, :, perm].reshape(1, C, H, W)
++        return x_clean * (1.0 - mask) + shuffled * mask
+ 
+     def forward(self, x):
+         patch_embed = self.tokenizer(x)
+@@ -322,19 +449,37 @@ class AnomalyMamba(nn.Module):
+         return loss
+         
+     def _cal_loss(self, a, b):
+-        """重建损失 - MSE + L1"""
+-        mse_loss = F.mse_loss(a, b)
+-        l1_loss = F.l1_loss(a, b)
+-        loss = mse_loss + self.lambda_spatial * l1_loss
++        """重建损失 - 按 loss_type 选择 MSE / L1 / MSE+L1 / Cosine"""
++        if self.loss_type == 'mse':
++            loss = F.mse_loss(a, b)
++        elif self.loss_type == 'l1':
++            loss = F.l1_loss(a, b)
++        elif self.loss_type == 'cosine':
++            loss = (1 - F.cosine_similarity(
++                a.view(a.shape[0], a.shape[1], -1),
++                b.view(b.shape[0], b.shape[1], -1),
++                dim=1,
++            )).mean()
++        else:  # 'mse_l1' (默认, 原行为)
++            mse_loss = F.mse_loss(a, b)
++            l1_loss = F.l1_loss(a, b)
++            loss = mse_loss + self.lambda_spatial * l1_loss
+         loss = loss * a.shape[0]
+         return loss
+ 
+     def _cal_am(self, a, b):
+-        """异常图计算"""
++        """异常图计算 - 评分函数与 loss_type 保持一致"""
+         mse_dist = (a - b).pow(2).mean(dim=1, keepdim=True)
+         l1_dist = (a - b).abs().mean(dim=1, keepdim=True)
+-        dist = mse_dist + self.lambda_spatial * l1_dist
+-        anomaly_map = F.interpolate(dist, size=(self.image_size, self.image_size), 
++        if self.loss_type == 'mse':
++            dist = mse_dist
++        elif self.loss_type == 'l1':
++            dist = l1_dist
++        elif self.loss_type == 'cosine':
++            dist = 1 - F.cosine_similarity(a, b, dim=1, eps=1e-8).unsqueeze(1)
++        else:  # 'mse_l1' (默认, 原行为)
++            dist = mse_dist + self.lambda_spatial * l1_dist
++        anomaly_map = F.interpolate(dist, size=(self.image_size, self.image_size),
+                                     mode='bilinear', align_corners=True)
+         return anomaly_map
+ 
+diff --git a/model/VarAD/trainer.py b/model/VarAD/trainer.py
+index 30d4115..c9f7598 100644
+--- a/model/VarAD/trainer.py
++++ b/model/VarAD/trainer.py
+@@ -16,6 +16,35 @@ from tool import calculate_metric, calculate_average_metric, plot_sample_cv2
+ from .anomaly_mamba import AnomalyMamba
+ 
+ 
++class _PadToMultiple:
++    """把张量 (C,H,W) 的 H,W 补边到 multiple 的倍数 (右/下方补边, 不缩放)."""
++
++    def __init__(self, multiple=14, fill=0.0):
++        self.multiple = multiple
++        self.fill = fill
++
++    def __call__(self, t):
++        h, w = t.shape[-2], t.shape[-1]
++        ph = (self.multiple - h % self.multiple) % self.multiple
++        pw = (self.multiple - w % self.multiple) % self.multiple
++        if ph or pw:
++            t = torch.nn.functional.pad(t, (0, pw, 0, ph), value=self.fill)
++        return t
++
++
++class _CropLR:
++    """裁掉 PIL 图像左右两侧各 n 个像素 (陶瓷边缘的黄边非异常, 不裁上下)."""
++
++    def __init__(self, n=0):
++        self.n = n
++
++    def __call__(self, img):  # PIL.Image
++        w, h = img.size
++        if self.n > 0 and w > 2 * self.n:
++            img = img.crop((self.n, 0, w - self.n, h))
++        return img
++
++
+ class AnomalyMambaTrainer(nn.Module):
+     def __init__(
+             self,
+@@ -25,7 +54,7 @@ class AnomalyMambaTrainer(nn.Module):
+             depths=[2, 2],
+             valid_path=0,
+             bos_length=4,
+-            pred_next_n=8,
++            pred_next_n=0,
+             lambda_spatial=1.,
+             learnable_bos=False,
+             use_pe=False,
+@@ -37,16 +66,26 @@ class AnomalyMambaTrainer(nn.Module):
+             pretrained=None,
+             adapter=['linear'],
+             use_sequence_prediction=True,
++            seq_loss_weight=0.5,
+             # ⭐ 噪声消融参数
+-            noise_type='all',
++            noise_type='divnoise',
++            noise_pattern='all',
++            noise_op='all',
+             noise_ratio_min=0.02,
+             noise_ratio_max=0.22,
+             clean_ratio=0.5,
++            decoder_type='vssm',
++            native_res=False,
++            edge_crop=0,
++            loss_type='mse_l1',
+     ):
+         super(AnomalyMambaTrainer, self).__init__()
+         self.device = device
+-        
+-        cache_data = torch.zeros((1, 3, image_size, image_size)).to(device)
++        self.native_res = native_res
++
++        # 原生分辨率模式下解码器与尺寸无关，仅用一个小方形 dummy 构建解码器即可
++        cache_size = 14 * 37 if native_res else image_size
++        cache_data = torch.zeros((1, 3, cache_size, cache_size)).to(device)
+         self.model = AnomalyMamba(
+             pred_next_n=pred_next_n,
+             backbone=backbone,
+@@ -64,32 +103,52 @@ class AnomalyMambaTrainer(nn.Module):
+             use_path_weights=use_path_weights,
+             adapter=adapter,
+             use_sequence_prediction=use_sequence_prediction,
++            seq_loss_weight=seq_loss_weight,
+             # ⭐ 传递噪声参数
+             noise_type=noise_type,
++            noise_pattern=noise_pattern,
++            noise_op=noise_op,
+             noise_ratio_min=noise_ratio_min,
+             noise_ratio_max=noise_ratio_max,
+             clean_ratio=clean_ratio,
++            decoder_type=decoder_type,
++            loss_type=loss_type,
+         )
+         self.model.to(device)
+         
+         mean_train = [0.485, 0.456, 0.406]
+         std_train = [0.229, 0.224, 0.225]
+         self.image_size = image_size
+-        
+-        self.data_transform = transforms.Compose([
+-            transforms.Resize((image_size, image_size),
+-                              interpolation=transforms.InterpolationMode.BICUBIC),
+-            transforms.CenterCrop(image_size),
+-            transforms.ToTensor(),
+-            transforms.Normalize(mean=mean_train, std=std_train)
+-        ])
+ 
+-        self.target_transform = transforms.Compose([
+-            transforms.Resize((image_size, image_size),
+-                              interpolation=transforms.InterpolationMode.NEAREST),
+-            transforms.CenterCrop(image_size),
+-            transforms.ToTensor()
+-        ])
++        # 先裁掉左右黄边 (若启用), 再做后续变换; 图像与 mask 使用同一裁剪保证对齐
++        crop_prefix = [_CropLR(edge_crop)] if edge_crop > 0 else []
++        if native_res:
++            # 原生分辨率: 不 resize, 仅把长宽补边到 14 的倍数 (右/下方补边)
++            pad14 = _PadToMultiple(multiple=14, fill=0.0)
++            self.data_transform = transforms.Compose(crop_prefix + [
++                transforms.ToTensor(),
++                transforms.Normalize(mean=mean_train, std=std_train),
++                pad14,
++            ])
++            self.target_transform = transforms.Compose(crop_prefix + [
++                transforms.ToTensor(),
++                pad14,
++            ])
++        else:
++            self.data_transform = transforms.Compose(crop_prefix + [
++                transforms.Resize((image_size, image_size),
++                                  interpolation=transforms.InterpolationMode.BICUBIC),
++                transforms.CenterCrop(image_size),
++                transforms.ToTensor(),
++                transforms.Normalize(mean=mean_train, std=std_train)
++            ])
++
++            self.target_transform = transforms.Compose(crop_prefix + [
++                transforms.Resize((image_size, image_size),
++                                  interpolation=transforms.InterpolationMode.NEAREST),
++                transforms.CenterCrop(image_size),
++                transforms.ToTensor()
++            ])
+ 
+         self.optimizer = torch.optim.AdamW(
+             filter(lambda p: p.requires_grad, self.model.parameters()),
+@@ -117,12 +176,30 @@ class AnomalyMambaTrainer(nn.Module):
+ 
+         # ⭐ 模型名包含噪声类型
+         noise_type = getattr(args, 'noise_type', 'all')
++        decoder_type = getattr(args, 'decoder_type', 'vssm')
+         model_name = '{:}-{:}-{:}-{:}-{:}-{:}-{:}-noise_{:}'.format(
+             args.dataset, args.model,
+             args.image_size, args.pred_next_n,
+             args.adapter, args.hierarchies, args.valid_path,
+             noise_type
+         )
++        # ortho 模式下把空间模板/腐蚀算子并入模型名，避免不同消融组合互相覆盖
++        if noise_type == 'ortho':
++            noise_pattern = getattr(args, 'noise_pattern', 'all')
++            noise_op = getattr(args, 'noise_op', 'all')
++            model_name = f'{model_name}-pat_{noise_pattern}-op_{noise_op}'
++        if decoder_type != 'vssm':
++            model_name = f'{model_name}-decoder_{decoder_type}'
++
++        lambda_spatial = getattr(args, 'lambda_spatial', 1.0)
++        seq_loss_weight = getattr(args, 'seq_loss_weight', 0.5)
++        model_name = f'{model_name}-lam{lambda_spatial}-seq{seq_loss_weight}'
++
++        # loss_type 仅在非默认 'mse_l1' 时并入模型名, 避免改变既有 checkpoint 命名,
++        # 同时防止 mse/l1/mse_l1 三者在同一目录互相覆盖
++        loss_type = getattr(args, 'loss_type', 'mse_l1')
++        if loss_type != 'mse_l1':
++            model_name = f'{model_name}-loss{loss_type}'
+ 
+         ckp_path = os.path.join(model_root, f'{model_name}-{args.category}')
+ 
+diff --git a/model/VarAD/vssm.py b/model/VarAD/vssm.py
+index 97b50b9..f9652d0 100644
+--- a/model/VarAD/vssm.py
++++ b/model/VarAD/vssm.py
+@@ -1072,7 +1072,7 @@ class VSSM(nn.Module):
+         # B K L C
+         # TODO: make learnable weights for individual paths
+         # TODO: need better understanding to CrossMerge so to modify it
+-        x = x[:, :, self.bos_length - self.pred_next_n : -self.pred_next_n, :]
++        x = x[:, :, self.bos_length - self.pred_next_n : x.shape[2] - self.pred_next_n, :]
+ 
+         # merge the results of different paths
+         x = x.permute(0, 1, 3, 2).contiguous() # B, K, C, L
+diff --git a/tool/logger.py b/tool/logger.py
+index d7bd3c1..47addd1 100644
+--- a/tool/logger.py
++++ b/tool/logger.py
+@@ -99,7 +99,7 @@ class Logger(object):
+ def log_metrics(metrics, logger, tensorboard_logger, epoch):
+     def log_single_class(data, tag):
+         logger.info(
+-            '{:>15} \t\tI-Auroc:{:.2f} \tI-F1:{:.2f} \tI-AP:{:.2f} \tP-Auroc:{:.2f} \tP-F1:{:.2f} \tP-AP:{:.2f} \tPRO:{:.2f} \tmax-IoU:{:.2f}'.
++            '{:>15} \t\tI-Auroc:{:.2f} \tI-F1:{:.2f} \tI-AP:{:.2f} \tP-Auroc:{:.2f} \tP-F1:{:.2f} \tP-AP:{:.2f} \tPRO:{:.2f} \tmax-IoU:{:.2f} \t漏检率:{:.2f} \t误检率:{:.2f}'.
+             format(tag,
+                    data.get('auroc_im', 0.0),
+                    data.get('f1_im', 0.0),
+@@ -109,12 +109,14 @@ def log_metrics(metrics, logger, tensorboard_logger, epoch):
+                    data.get('ap_px', 0.0),
+                    data.get('aupro', 0.0),
+                    data.get('max_iou', 0.0),
++                   data.get('fnr', 0.0),
++                   data.get('fpr', 0.0),
+                    )
+         )
+         # Adding scalar metrics to TensorBoard
+         # [FIX] Check if tensorboard_logger exists before writing
+         if tensorboard_logger is not None:
+-            for metric_name in ['auroc_im', 'f1_im', 'ap_im', 'auroc_px', 'f1_px', 'ap_px', 'aupro']:
++            for metric_name in ['auroc_im', 'f1_im', 'ap_im', 'auroc_px', 'f1_px', 'ap_px', 'aupro', 'fnr', 'fpr']:
+                 if metric_name in data:
+                     tensorboard_logger.add_scalar(f'{tag}-{metric_name}', data[metric_name], epoch)
+ 
+diff --git a/tool/metrics.py b/tool/metrics.py
+index b0a7368..ef8149d 100644
+--- a/tool/metrics.py
++++ b/tool/metrics.py
+@@ -1,7 +1,7 @@
+ 
+ import numpy as np
+ from skimage import measure
+-from sklearn.metrics import auc, roc_auc_score, precision_recall_curve, average_precision_score
++from sklearn.metrics import auc, roc_auc_score, precision_recall_curve, average_precision_score, confusion_matrix
+ 
+ 
+ def rescale(x):
+@@ -108,16 +108,28 @@ def calculate_px_metrics(gt_px, pr_px, cal_pro):
+ 
+ def calculate_im_metrics(gt_im, pr_im):
+     if is_one_class(gt_im):
+-        return 0, 0, 0
++        return 0, 0, 0, 0, 0
+ 
+-    auroc_im = roc_auc_score(gt_im.ravel(), pr_im.ravel())
+-    precisions, recalls, thresholds = precision_recall_curve(gt_im.ravel(), pr_im.ravel())
+-    # f1_scores = (2 * precisions * recalls) / (precisions + recalls)
++    gt_flat = gt_im.ravel()
++    pr_flat = pr_im.ravel()
++
++    auroc_im = roc_auc_score(gt_flat, pr_flat)
++    precisions, recalls, thresholds = precision_recall_curve(gt_flat, pr_flat)
+     f1_scores = (2 * precisions * recalls) / (precisions + recalls + 1e-10)
+-    f1_im = np.max(f1_scores[np.isfinite(f1_scores)])
+-    ap_im = average_precision_score(gt_im, pr_im)
++    best_idx = np.argmax(np.where(np.isfinite(f1_scores), f1_scores, -np.inf))
++    f1_im = f1_scores[best_idx]
++    ap_im = average_precision_score(gt_flat, pr_flat)
++
++    # FNR（漏检率）和 FPR（误检率）在最优 F1 阈值处计算
++    if best_idx < len(thresholds):
++        pred = (pr_flat >= thresholds[best_idx]).astype(int)
++        tn, fp, fn, tp = confusion_matrix(gt_flat, pred, labels=[0, 1]).ravel()
++        fnr = fn / (fn + tp + 1e-10)
++        fpr = fp / (fp + tn + 1e-10)
++    else:
++        fnr, fpr = 1.0, 0.0
+ 
+-    return ap_im * 100, auroc_im * 100, f1_im * 100
++    return ap_im * 100, auroc_im * 100, f1_im * 100, fnr * 100, fpr * 100
+ 
+ 
+ def calculate_average_metric(metrics: dict):
+@@ -157,7 +169,7 @@ def calculate_metric(results, obj, cal_pro=False, by_specie=False, specie=None):
+     pr_im = np.array(pr_im)
+ 
+     auroc_px, f1_px, ap_px, aupro, max_iou = calculate_px_metrics(gt_px, pr_px, cal_pro)
+-    ap_im, auroc_im, f1_im = calculate_im_metrics(gt_im, pr_im)
++    ap_im, auroc_im, f1_im, fnr, fpr = calculate_im_metrics(gt_im, pr_im)
+ 
+     metric = {
+         'auroc_px': auroc_px,
+@@ -168,6 +180,8 @@ def calculate_metric(results, obj, cal_pro=False, by_specie=False, specie=None):
+         'ap_im': ap_im,
+         'aupro': aupro,
+         'max_iou': max_iou,
++        'fnr': fnr,
++        'fpr': fpr,
+     }
+ 
+     return metric
+\ No newline at end of file

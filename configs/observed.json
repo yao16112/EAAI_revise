@@ -1,0 +1,32 @@
+{
+  "model": "dinov2_vitb14",
+  "hierarchies": [
+    1,
+    2,
+    3
+  ],
+  "adapter": [
+    "linear"
+  ],
+  "image_size": 1022,
+  "epoch": 60,
+  "batch_size": 2,
+  "learning_rate": 0.0005,
+  "pred_next_n": 8,
+  "valid_path": -1,
+  "is_proj": true,
+  "use_seq_pred": true,
+  "seq_loss_weight": 0.5,
+  "lambda_spatial": 1.0,
+  "noise_type": "divnoise",
+  "noise_pattern": "all",
+  "noise_op": "all",
+  "noise_ratio_min": 0.02,
+  "noise_ratio_max": 0.22,
+  "clean_ratio": 0.5,
+  "decoder_type": "vssm",
+  "loss_type": "mse_l1",
+  "native_res": false,
+  "edge_crop": 0,
+  "seed": 111
+}

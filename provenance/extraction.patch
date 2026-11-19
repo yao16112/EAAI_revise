@@ -1,0 +1,413 @@
+--- source/main.py
++++ extracted/main.py
+@@ -10,6 +10,9 @@
+ """
+ 
+ import os
++import json
++from pathlib import Path
++from config import PATHS
+ import warnings
+ 
+ # 忽略 FutureWarning 警告
+@@ -30,7 +33,6 @@
+ from tool import save_metric, setup_seed, Logger, log_metrics
+ 
+ 
+-setup_seed(111)
+ 
+ # MVTec AD 数据集的 15 个类别
+ MVTEC_CATEGORIES = [
+@@ -56,44 +58,8 @@
+     'Woven_068', 'Woven_104', 'Woven_125', 'Woven_127'
+ ]
+ 
+-def train_single_category(args, category):
+-    """训练单个类别"""
+-    # Configurations
+-    epochs = args.epoch
+-    learning_rate = args.learning_rate
+-    batch_size = args.batch_size
+-    image_size = args.image_size
+-    
+-    # 使用指定的GPU
+-    if torch.cuda.is_available():
+-        device = f'cuda:{args.gpu}'
+-        print("1111111111111111111")
+-    else:
+-        device = 'cpu'
+-        print("2222222222222222222")
+-
+-    # 临时修改 args.category 为当前类别
+-    original_category = args.category
+-    args.category = category
+-
+-    # Set up paths
+-    model_name, image_dir, csv_path, log_path, ckp_path, tensorboard_logger = AnomalyMambaTrainer.setup_paths(args)
+-
+-    # Extract configurations
+-    save_fig = args.save_fig
+-    do_train = args.do_train
+-    cal_pro = args.cal_pro
+-
+-    # Logger
+-    logger = Logger(log_path)
+-
+-    # Print basic information
+-    for key, value in sorted(vars(args).items()):
+-        logger.info(f'{key} = {value}')
+-
+-    logger.info('Model name: {:}'.format(model_name))
+-
+-    model = AnomalyMambaTrainer(
++def build_trainer(args, device):
++    return AnomalyMambaTrainer(
+         backbone=args.model,
+         norm=True,
+         depths=[1],
+@@ -101,7 +67,7 @@
+         pred_next_n=args.pred_next_n,
+         valid_path=args.valid_path,
+         image_size=args.image_size,
+-        learning_rate=learning_rate,
++        learning_rate=args.learning_rate,
+         device=device,
+         pretrained=args.ckt_path,
+         is_proj=args.is_proj,
+@@ -121,6 +87,47 @@
+         loss_type=getattr(args, 'loss_type', 'mse_l1'),
+     )
+ 
++
++def train_single_category(args, category):
++    """训练单个类别"""
++    setup_seed(args.seed)
++    # Configurations
++    epochs = args.epoch
++    learning_rate = args.learning_rate
++    batch_size = args.batch_size
++    image_size = args.image_size
++    
++    # 使用指定的GPU
++    if torch.cuda.is_available():
++        device = f'cuda:{args.gpu}'
++        print("1111111111111111111")
++    else:
++        device = 'cpu'
++        print("2222222222222222222")
++
++    # 临时修改 args.category 为当前类别
++    original_category = args.category
++    args.category = category
++
++    # Set up paths
++    model_name, image_dir, csv_path, log_path, ckp_path, tensorboard_logger = AnomalyMambaTrainer.setup_paths(args)
++
++    # Extract configurations
++    save_fig = args.save_fig
++    do_train = args.do_train
++    cal_pro = args.cal_pro
++
++    # Logger
++    logger = Logger(log_path)
++
++    # Print basic information
++    for key, value in sorted(vars(args).items()):
++        logger.info(f'{key} = {value}')
++
++    logger.info('Model name: {:}'.format(model_name))
++
++    model = build_trainer(args, device)
++
+     train_data_cls_names, train_data, train_data_root = get_dataset(
+         dataset_types=args.dataset,
+         transform=model.data_transform,
+@@ -144,11 +151,14 @@
+         args.category = original_category
+         return None
+ 
+-    best_f1 = 0
+     by_specie = (args.dataset == 'mvtec_loco')
+ 
+     final_metrics = None
+ 
++    config_path = Path(ckp_path + '_config.json')
++    config_path.write_text(json.dumps({"arguments": vars(args), "paths": PATHS,
++                                      "checkpoint_selection": "fixed_final_epoch",
++                                      "f1_threshold": "test_oracle"}, indent=2))
+     if do_train:
+         for epoch in tqdm(range(epochs), desc=f"Training {category}"):
+             loss = model.train_epoch(train_dataloader)
+@@ -159,7 +169,8 @@
+                 tensorboard_logger.add_scalar('loss', loss, epoch)
+ 
+             # Validation
+-            if (epoch + 1) % args.valid_freq == 0 or (epoch == epochs - 1):
++            if epoch == epochs - 1:
++                model.save(ckp_path + '_final.pth')
+                 if epoch == epochs - 1:
+                     save_fig_flag = save_fig
+                 else:
+@@ -182,29 +193,17 @@
+                     epoch
+                 )
+ 
+-                # 综合指标：I-AUROC + P-AUROC 平均
+-                auroc_im = metric_dict_novel['Average']['auroc_im']
+-                auroc_px = metric_dict_novel['Average']['auroc_px']
+-                f1_px = (auroc_im + auroc_px) / 2
+-
+-                # Save best
+-                if f1_px > best_f1:
+-                    for k in metric_dict_novel.keys():
+-                        if k == 'Average':
+-                            continue
++                for k in metric_dict_novel:
++                    if k != 'Average':
+                         save_metric(metric_dict_novel[k], test_data_cls_names, k, csv_path)
+-
+-                    ckp_path_best = ckp_path + '_best.pth'
+-                    model.save(ckp_path_best)
+-                    best_f1 = f1_px
+-                    final_metrics = metric_dict_novel
++                final_metrics = metric_dict_novel
+ 
+     else:
+         if args.ckt_path:
+             ckt_path = args.ckt_path
+             logger.info(f'use manually specified ckt path: {ckt_path}')
+         else:
+-            ckt_path = ckp_path + '_best.pth'
++            ckt_path = ckp_path + '_final.pth'
+             logger.info(f'automatically generate ckt path: {ckt_path}')
+ 
+         logger.info(f'trying to load {ckt_path}')
+@@ -235,6 +234,8 @@
+         
+         final_metrics = metric_dict
+ 
++    Path(ckp_path + '_metrics.json').write_text(json.dumps(final_metrics, indent=2))
++    tensorboard_logger.close()
+     # 恢复原始 category
+     args.category = original_category
+     
+@@ -249,7 +250,7 @@
+     """主训练函数 - 支持训练多个类别"""
+         # ============ 新增：支持训练所有数据集 ============
+     if args.dataset == 'all':
+-        all_datasets = ['mvtec', 'visa', 'btad', 'dtd', 'taoci']
++        all_datasets = ['mvtec', 'visa', 'btad', 'dtd']
+         print("="*60)
+         print("训练所有数据集")
+         print("="*60)
+@@ -333,6 +334,7 @@
+             print(f"\n[✗] {category} 训练失败: {e}")
+             import traceback
+             traceback.print_exc()
++            raise
+     
+     # 打印总结
+     if len(categories) > 1:
+@@ -383,7 +385,7 @@
+     parser.add_argument("--dataset", type=str, default="mvtec", help="Dataset for training")
+     parser.add_argument("--category", type=str, nargs='+', default='all',
+                         help="Category for training. Use 'all' for all categories, or specify one or more categories")
+-    parser.add_argument("--save_path", type=str, default='./workspace', help='Path to save results')
++    parser.add_argument("--save_path", type=str, required=True, help="New output directory; existing paths are rejected")
+ 
+     parser.add_argument("--save_fig", type=str2bool, default=False)
+     parser.add_argument("--compute_fps", type=str2bool, default=False)
+@@ -435,7 +437,19 @@
+     parser.add_argument('--loss_type', type=str, default='mse_l1', choices=['mse_l1', 'mse', 'l1', 'cosine'],
+                         help="重建损失类型: mse_l1(默认,原行为)/mse/l1/cosine; 用于 loss-function 消融")
+ 
++    parser.add_argument("--seed", type=int, default=111)
++    with (Path(__file__).resolve().parent / 'configs/observed.json').open() as f:
++        parser.set_defaults(**json.load(f))
+     args = parser.parse_args()
++    if args.dataset not in ('mvtec', 'visa', 'btad', 'dtd', 'all'):
++        parser.error("Only the four public MARS benchmarks are included")
++    if args.model != 'dinov2_vitb14' or args.decoder_type != 'vssm':
++        parser.error("This extraction supports DINOv2 ViT-B/14 with VSSM")
++    if args.epoch < 1 or args.batch_size < 1 or args.learning_rate <= 0:
++        parser.error("epochs, batch size and learning rate must be positive")
++    if not args.do_train and not Path(args.ckt_path).is_file():
++        parser.error("Evaluation requires an existing --ckt_path")
++    Path(args.save_path).mkdir(parents=True, exist_ok=False)
+ 
+     # 处理 category 参数
+     if isinstance(args.category, list):
+--- source/model/VarAD/anomaly_mamba.py
++++ extracted/model/VarAD/anomaly_mamba.py
+@@ -9,8 +9,6 @@
+ import math
+ import numpy as np
+ from .vssm import VSSM
+-from .decoder_variants import build_decoder
+-from .vision_tokenizer import VisionTokenizer
+ from .dino_vision_tokenizer import VisionTokenizer as DINOVisionTokenizer
+ from torch import nn
+ from torch.nn import functional as F
+@@ -77,8 +75,7 @@
+             self.tokenizer = DINOVisionTokenizer(backbone=backbone, hierarchies=hierarchies, 
+                                                   norm=norm, adapter=adapter)
+         else:
+-            self.tokenizer = VisionTokenizer(backbone=backbone, hierarchies=hierarchies,
+-                                             norm=norm, is_proj=is_proj, image_size=image_size)
++            raise ValueError("Only the DINOv2 MARS backbone is included")
+ 
+         if cache_data is not None:
+             device = cache_data.device
+@@ -102,20 +99,6 @@
+                          cache_data=x[indx],
+                          use_path_weights=use_path_weights,
+                          ) for _ in range(n_blocks)
+-                ])
+-            elif self.decoder_type in {'cnn', 'transformer'}:
+-                decoder_temp = nn.Sequential(*[
+-                    build_decoder(
+-                        self.decoder_type,
+-                        dim=d,
+-                        depths=depths,
+-                        pred_next_n=pred_next_n // (2 ** indx),
+-                        valid_path=valid_path,
+-                        learnable_bos=learnable_bos,
+-                        use_pe=use_pe,
+-                        cache_data=x[indx],
+-                        use_path_weights=use_path_weights,
+-                    ) for _ in range(n_blocks)
+                 ])
+             else:
+                 raise ValueError(f"Unsupported decoder_type={decoder_type!r}")
+--- source/model/VarAD/dino_vision_tokenizer.py
++++ extracted/model/VarAD/dino_vision_tokenizer.py
+@@ -1,6 +1,6 @@
+ from torch import nn
+ import torch.nn.functional as F
+-from .tokenizer_backbones import *
++from .tokenizer_backbones import DINO
+ import torch
+ from .lora import LoRA
+ import math
+--- source/model/VarAD/tokenizer_backbones/__init__.py
++++ extracted/model/VarAD/tokenizer_backbones/__init__.py
+@@ -1,9 +1,3 @@
+-from .resnet import resnet18, resnet34, resnet50, resnet101, resnet152, wide_resnet50_2, wide_resnet101_2
+-from .hrnet import hrnet18, hrnet32, hrnet48
+-from .sam import SAM
+ from .dino import DINO
+-from .clip.backbone import CLIP_backbone as CLIP
+-from .vit import ViT_backbone
+ 
+-__all__ = ['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152', 'wide_resnet50_2', 'wide_resnet101_2',
+-           'hrnet18', 'hrnet32', 'hrnet48', 'SAM', 'DINO', 'CLIP', 'ViT_backbone']+__all__ = ["DINO"]
+--- source/model/VarAD/tokenizer_backbones/dino/model.py
++++ extracted/model/VarAD/tokenizer_backbones/dino/model.py
+@@ -10,12 +10,14 @@
+     def __init__(self, bacobone='dinov2_vits14'):
+         super(DINO, self).__init__()
+ 
+-        # DINOv2
+-        # self.dino = torch.hub.load('/home/anyad/.cache/torch/hub/facebookresearch_dinov2_main', bacobone, source='local')
+-        # Load from GitHub cache instead of hardcoded local path
+-        # self.dino = torch.hub.load('facebookresearch/dinov2', bacobone)
+-        path_to_cache = '/root/.cache/torch/hub/facebookresearch_dinov2_main'
+-        self.dino = torch.hub.load(path_to_cache, bacobone, source='local')
++        from pathlib import Path
++        from config import PATHS
++        hub = Path(PATHS["dinov2_hub"])
++        weights = Path(PATHS["dinov2_weights"])
++        if not hub.is_dir() or not weights.is_file():
++            raise FileNotFoundError("Configured local DINOv2 source/weights are missing; downloads are disabled")
++        self.dino = torch.hub.load(str(hub), bacobone, source='local', pretrained=False)
++        self.dino.load_state_dict(torch.load(weights, map_location='cpu', weights_only=True), strict=True)
+ 
+     def interpolate_pos_encoding(self, x, w, h):
+         previous_dtype = x.dtype
+--- source/dataset/__init__.py
++++ extracted/dataset/__init__.py
+@@ -3,7 +3,6 @@
+ from .btad import BTAD_CLS_NAMES, BTADDataset, BTAD_ROOT
+ from .dtd import DTD_CLS_NAMES,DTDDataset,DTD_ROOT
+ 
+-from .taoci import TAOCI_CLS_NAMES, TaoциDataset, TAOCI_ROOT
+ from .base import BaseDataset
+ from torch.utils.data import ConcatDataset
+ 
+@@ -12,7 +11,6 @@
+     'dtd': (DTD_CLS_NAMES, DTDDataset, DTD_ROOT),
+     'mvtec': (MVTEC_CLS_NAMES, MVTecDataset, MVTEC_ROOT),
+     'visa': (VISA_CLS_NAMES, VisaDataset, VISA_ROOT),
+-    'taoci': (TAOCI_CLS_NAMES, TaoциDataset, TAOCI_ROOT),
+ }
+ 
+ def get_dataset(dataset_types, transform, target_transform, training, mode, k_shot,
+--- source/dataset/mvtec.py
++++ extracted/dataset/mvtec.py
+@@ -18,7 +18,8 @@
+ 
+ from config import DATA_ROOT
+ 
+-MVTEC_ROOT = '/opt/data/private/MVTecAD'  # <--- CHANGE THIS
++from config import DATASET_ROOTS
++MVTEC_ROOT = DATASET_ROOTS['mvtec']
+ 
+ 
+ class MVTecDataset(BaseDataset):
+--- source/dataset/visa.py
++++ extracted/dataset/visa.py
+@@ -15,7 +15,8 @@
+     'pcb4', 'pipe_fryum',
+ ]
+ 
+-VISA_ROOT = '/opt/data/private/Data/VisA'
++from config import DATASET_ROOTS
++VISA_ROOT = DATASET_ROOTS['visa']
+ 
+ 
+ class VisaSolver(object):
+@@ -197,4 +198,4 @@
+             'cls_name': cls_name,
+             'anomaly': anomaly,
+             'img_path': full_img_path
+-        }+        }
+--- source/dataset/btad.py
++++ extracted/dataset/btad.py
+@@ -13,7 +13,8 @@
+ 
+ from config import DATA_ROOT
+ 
+-BTAD_ROOT = '/opt/data/private/Btad'
++from config import DATASET_ROOTS
++BTAD_ROOT = DATASET_ROOTS['btad']
+ 
+ 
+ class BTADDataset(BaseDataset):
+--- source/dataset/dtd.py
++++ extracted/dataset/dtd.py
+@@ -13,7 +13,8 @@
+ ]
+ from config import DATA_ROOT
+ 
+-DTD_ROOT = '/opt/data/private/data/dtd-synthetic'
++from config import DATASET_ROOTS
++DTD_ROOT = DATASET_ROOTS['dtd']
+ 
+ class DTDDataset(BaseDataset):
+     def __init__(self, class_names, transform, target_transform, synthesis_anomalies, root=DTD_ROOT, training=True,
+--- source/config/__init__.py
++++ extracted/config/__init__.py
+@@ -1 +1 @@
+-from .global_config import DATA_ROOT+from .global_config import DATA_ROOT, DATASET_ROOTS, PATHS, PATHS_FILE
+--- source/config/global_config.py
++++ extracted/config/global_config.py
+@@ -1 +1,9 @@
+-DATA_ROOT = '/opt/data/private/MVTecAD'+import json
++import os
++from pathlib import Path
++
++PATHS_FILE = Path(os.environ.get("MARS_PATHS_CONFIG", Path(__file__).resolve().parents[1] / "configs/paths.json"))
++with PATHS_FILE.open() as f:
++    PATHS = json.load(f)
++DATASET_ROOTS = PATHS["datasets"]
++DATA_ROOT = DATASET_ROOTS["mvtec"]
